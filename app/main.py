@@ -17,6 +17,8 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_
 from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, create_engine, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
+from app.observability import get_trace_id, setup_telemetry
+
 SERVICE_NAME = os.getenv("SERVICE_NAME", "payment-service")
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./payment.db")
 SEED_DATA_DIR = Path(os.getenv("SEED_DATA_DIR", ""))
@@ -129,6 +131,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Payment Service", version="1.0.0", lifespan=lifespan)
+setup_telemetry(app, engine, SERVICE_NAME)
 
 
 @app.middleware("http")
@@ -141,7 +144,7 @@ async def telemetry(request: Request, call_next):
     REQUEST_COUNT.labels(SERVICE_NAME, request.url.path, request.method, str(response.status_code)).inc()
     REQUEST_LATENCY.labels(SERVICE_NAME, request.url.path, request.method).observe(elapsed)
     response.headers["X-Correlation-Id"] = correlation_id
-    logger.info(json.dumps({"service": SERVICE_NAME, "correlationId": correlation_id, "path": request.url.path, "statusCode": response.status_code, "latencyMs": round(elapsed * 1000, 2)}))
+    logger.info(json.dumps({"service": SERVICE_NAME, "correlationId": correlation_id, "traceId": get_trace_id(), "path": request.url.path, "statusCode": response.status_code, "latencyMs": round(elapsed * 1000, 2)}))
     return response
 
 
