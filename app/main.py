@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from fastapi import Depends, FastAPI, Header, Query, Request
+from fastapi import Depends, FastAPI, Header, Query, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
@@ -78,6 +78,10 @@ class RefundRequest(BaseModel):
     reason: Optional[str] = None
 
 
+class PaymentUpdate(BaseModel):
+    reference: str
+
+
 class PaymentOut(BaseModel):
     payment_id: int
     order_id: int
@@ -121,6 +125,11 @@ def seed_data():
 
 def request_hash(payload: dict) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def validate_amount(amount: float) -> None:
+    if amount <= 0:
+        raise ApiError("INVALID_AMOUNT", "Amount must be greater than zero", 400)
 
 
 @asynccontextmanager
@@ -185,6 +194,7 @@ def get_payment(payment_id: int, db: Session = Depends(get_db)):
 def charge_payment(payload: ChargeRequest, db: Session = Depends(get_db), idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key")):
     if not idempotency_key:
         raise ApiError("MISSING_IDEMPOTENCY_KEY", "Idempotency-Key header is required", 400)
+    validate_amount(payload.amount)
     payload_hash = request_hash(payload.model_dump())
     existing = db.query(IdempotencyKey).filter(IdempotencyKey.idempotency_key == idempotency_key).first()
     if existing:
@@ -217,3 +227,29 @@ def refund_payment(payment_id: int, request: RefundRequest, db: Session = Depend
     payment.status = "REFUNDED"
     db.commit()
     return {"payment_id": payment.payment_id, "status": payment.status, "reason": request.reason}
+
+
+@app.patch("/v1/payments/{payment_id}", response_model=PaymentOut)
+def update_payment(payment_id: int, payload: PaymentUpdate, db: Session = Depends(get_db)):
+    payment = db.get(Payment, payment_id)
+    if not payment:
+        raise ApiError("PAYMENT_NOT_FOUND", f"Payment {payment_id} not found", 404)
+    if payment.status == "REFUNDED":
+        raise ApiError("PAYMENT_UPDATE_BLOCKED", "Refunded payments cannot be edited", 409)
+    payment.reference = payload.reference
+    db.commit()
+    db.refresh(payment)
+    return payment
+
+
+@app.delete("/v1/payments/{payment_id}", status_code=204)
+def delete_payment(payment_id: int, db: Session = Depends(get_db)):
+    payment = db.get(Payment, payment_id)
+    if not payment:
+        raise ApiError("PAYMENT_NOT_FOUND", f"Payment {payment_id} not found", 404)
+    if payment.status not in {"FAILED", "REFUNDED"}:
+        raise ApiError("PAYMENT_DELETE_BLOCKED", "Only failed or refunded payments can be deleted", 409)
+    db.query(IdempotencyKey).filter(IdempotencyKey.payment_id == payment_id).delete()
+    db.delete(payment)
+    db.commit()
+    return Response(status_code=204)
