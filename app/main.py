@@ -14,7 +14,7 @@ from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, create_engine
+from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, create_engine, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "payment-service")
@@ -95,6 +95,10 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+def next_id(db: Session, model, column) -> int:
+    return (db.query(func.max(column)).scalar() or 0) + 1
 
 
 def parse_dt(value: str) -> datetime:
@@ -190,10 +194,10 @@ def charge_payment(payload: ChargeRequest, db: Session = Depends(get_db), idempo
     if method not in {"CARD", "UPI", "WALLET", "COD"}:
         raise ApiError("UNSUPPORTED_PAYMENT_METHOD", f"Payment method {payload.method} is not supported", 400)
     status = "PENDING" if method == "COD" else "FAILED" if payload.simulate_failure else "SUCCESS"
-    payment = Payment(order_id=payload.order_id, amount=round(payload.amount, 2), method=method, status=status, reference=payload.reference or f"PAY-{uuid.uuid4().hex[:10].upper()}", created_at=datetime.utcnow())
+    payment = Payment(payment_id=next_id(db, Payment, Payment.payment_id), order_id=payload.order_id, amount=round(payload.amount, 2), method=method, status=status, reference=payload.reference or f"PAY-{uuid.uuid4().hex[:10].upper()}", created_at=datetime.utcnow())
     db.add(payment)
     db.flush()
-    db.add(IdempotencyKey(idempotency_key=idempotency_key, request_hash=payload_hash, payment_id=payment.payment_id, created_at=datetime.utcnow()))
+    db.add(IdempotencyKey(id=next_id(db, IdempotencyKey, IdempotencyKey.id), idempotency_key=idempotency_key, request_hash=payload_hash, payment_id=payment.payment_id, created_at=datetime.utcnow()))
     db.commit()
     if status == "FAILED":
         PAYMENTS_FAILED.labels(SERVICE_NAME).inc()
