@@ -78,6 +78,10 @@ class RefundRequest(BaseModel):
     reason: Optional[str] = None
 
 
+class CaptureRequest(BaseModel):
+    reference: Optional[str] = None
+
+
 class PaymentUpdate(BaseModel):
     reference: str
 
@@ -227,6 +231,25 @@ def refund_payment(payment_id: int, request: RefundRequest, db: Session = Depend
     payment.status = "REFUNDED"
     db.commit()
     return {"payment_id": payment.payment_id, "status": payment.status, "reason": request.reason}
+
+
+@app.post("/v1/payments/{payment_id}/capture")
+def capture_payment(payment_id: int, request: CaptureRequest, db: Session = Depends(get_db)):
+    payment = db.get(Payment, payment_id)
+    if not payment:
+        raise ApiError("PAYMENT_NOT_FOUND", f"Payment {payment_id} not found", 404)
+    if payment.status == "SUCCESS":
+        return {"payment_id": payment.payment_id, "status": payment.status, "reference": payment.reference, "captured": False}
+    if payment.status in {"FAILED", "REFUNDED"}:
+        raise ApiError("CAPTURE_NOT_ALLOWED", f"Payment in status {payment.status} cannot be captured", 409)
+    if payment.status != "PENDING":
+        raise ApiError("CAPTURE_NOT_ALLOWED", f"Payment in status {payment.status} cannot be captured", 409)
+    payment.status = "SUCCESS"
+    if request.reference:
+        payment.reference = request.reference
+    db.commit()
+    db.refresh(payment)
+    return {"payment_id": payment.payment_id, "status": payment.status, "reference": payment.reference, "captured": True}
 
 
 @app.patch("/v1/payments/{payment_id}", response_model=PaymentOut)
